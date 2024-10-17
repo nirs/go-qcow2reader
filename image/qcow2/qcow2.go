@@ -893,6 +893,9 @@ func (img *Qcow2) readZero(p []byte, off int64) (int, error) {
 	return readZero(p, off, img.Header.Size)
 }
 
+// 2k-1m show similar performance, 4k shows most consistent results.
+var zeroBuffer = make([]byte, 4*1024)
+
 func readZero(p []byte, off int64, sz uint64) (int, error) {
 	var err error
 	l := len(p)
@@ -903,8 +906,9 @@ func readZero(p []byte, off int64, sz uint64) (int, error) {
 		}
 		err = io.EOF
 	}
-	for i := 0; i < l; i++ {
-		p[i] = 0
+	var n int
+	for n < l {
+		n += copy(p[n:l], zeroBuffer)
 	}
 	return l, err
 }
