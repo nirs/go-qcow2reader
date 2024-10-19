@@ -1,0 +1,143 @@
+package convert
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+)
+
+const SegmentSize = 32 * 1024 * 1024
+const BufferSize = 1024 * 1024
+const Workers = 8
+
+type Options struct {
+	SegmentSize int64
+	BufferSize  int
+	Workers     int
+}
+
+type Converter struct {
+	// Read only after starting.
+	size        int64
+	segmentSize int64
+	bufferSize  int
+	workers     int
+
+	// State modified during Convert, protected by the mutex.
+	mutex  sync.Mutex
+	offset int64
+	err    error
+}
+
+// New return a new converter intialized from options.
+func New(opts Options) *Converter {
+	if opts.SegmentSize == 0 {
+		opts.SegmentSize = SegmentSize
+	}
+	if opts.BufferSize == 0 {
+		opts.BufferSize = BufferSize
+	}
+	if opts.Workers == 0 {
+		opts.Workers = Workers
+	}
+	return &Converter{
+		segmentSize: opts.SegmentSize,
+		bufferSize:  opts.BufferSize,
+		workers:     opts.Workers,
+	}
+}
+
+// nextSegment returns the next segment to process and stop flag. The stop flag
+// is true if there is no more work, or if another workers has failed and set
+// the error.
+func (c *Converter) nextSegment() (int64, int64, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.offset == c.size || c.err != nil {
+		return 0, 0, true
+	}
+
+	start := c.offset
+	c.offset += c.segmentSize
+	if c.offset > c.size {
+		c.offset = c.size
+	}
+
+	return start, c.offset, false
+}
+
+// setError keeps the first error set. Setting the error signal other workes to
+// abort the operation.
+func (c *Converter) setError(err error) {
+	c.mutex.Lock()
+	if c.err == nil {
+		c.err = err
+	}
+	c.mutex.Unlock()
+}
+
+func (c *Converter) reset(size int64) {
+	c.size = size
+	c.err = nil
+	c.offset = 0
+}
+
+// Convert copy and decompress guest data from source image and write it to the
+// destination. Unallocated areas or areas full of zeros are keep unallocated in
+// the destination. The destination must be new empty file or full of zeroes.
+func (c *Converter) Convert(wa io.WriterAt, ra io.ReaderAt, size int64) error {
+	c.reset(size)
+
+	zero := make([]byte, c.bufferSize)
+	var wg sync.WaitGroup
+
+	for i := 0; i < c.workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, c.bufferSize)
+			for {
+				// Get next segment to copy.
+				start, end, stop := c.nextSegment()
+				if stop {
+					return
+				}
+
+				for start < end {
+					// The last read of the last segment may be shorter.
+					if end-start < int64(len(buf)) {
+						buf = buf[:end-start]
+					}
+
+					// Read more data.
+					nr, err := ra.ReadAt(buf, start)
+					if err != nil {
+						if !errors.Is(err, io.EOF) {
+							c.setError(err)
+							return
+						}
+					}
+
+					// If the data is all zeros we skip it to create a hole. Otherwise
+					// write the data.
+					if !bytes.Equal(buf[:nr], zero[:nr]) {
+						if nw, err := wa.WriteAt(buf[:nr], start); err != nil {
+							c.setError(err)
+							return
+						} else if nw != nr {
+							c.setError(fmt.Errorf("unable to write %d bytes", nr))
+							return
+						}
+					}
+					start += int64(nr)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	return c.err
+}
