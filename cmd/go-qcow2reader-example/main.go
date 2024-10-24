@@ -69,6 +69,8 @@ func main() {
 		err = cmdInfo(args)
 	case "read":
 		err = cmdRead(args)
+	case "convert":
+		err = cmdConvert(args)
 	default:
 		usage()
 	}
