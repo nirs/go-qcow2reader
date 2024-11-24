@@ -43,6 +43,7 @@ Available commands:
   read		read image data and print to stdout
   convert	convert image to raw format
   map		print image extents
+  checksum	print image checksum
 `
 	fmt.Fprintf(os.Stderr, usage, os.Args[0])
 	os.Exit(1)
@@ -74,6 +75,8 @@ func main() {
 		err = cmdConvert(args)
 	case "map":
 		err = cmdMap(args)
+	case "checksum":
+		err = cmdChecksum(args)
 	default:
 		usage()
 	}
